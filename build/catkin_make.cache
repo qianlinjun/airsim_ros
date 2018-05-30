@@ -1,0 +1,2 @@
+airsim_bridge:octomap_mapping/octomap_mapping:octomap_mapping/octomap_server:octomap_msgs:octomap_ros:octomap_rviz_plugins
+-DCATKIN_DEVEL_PREFIX=/home/exbot/catkin_ws/devel -DCMAKE_INSTALL_PREFIX=/home/exbot/catkin_ws/install -G Unix Makefiles

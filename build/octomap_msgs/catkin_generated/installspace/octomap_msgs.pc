@@ -1,0 +1,8 @@
+prefix=/home/exbot/catkin_ws/install
+
+Name: octomap_msgs
+Description: Description of octomap_msgs
+Version: 0.3.3
+Cflags: -I/home/exbot/catkin_ws/install/include
+Libs: -L/home/exbot/catkin_ws/install/lib 
+Requires: message_runtime geometry_msgs std_msgs

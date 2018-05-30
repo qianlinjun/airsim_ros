@@ -1,0 +1,8 @@
+prefix=/home/exbot/catkin_ws/install
+
+Name: octomap_ros
+Description: Description of octomap_ros
+Version: 0.4.0
+Cflags: -I/home/exbot/catkin_ws/install/include -I/opt/ros/kinetic/include
+Libs: -L/home/exbot/catkin_ws/install/lib -loctomap_ros /opt/ros/kinetic/lib/liboctomap.so /opt/ros/kinetic/lib/liboctomath.so
+Requires: sensor_msgs tf octomap_msgs

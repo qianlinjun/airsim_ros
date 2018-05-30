@@ -1,0 +1,8 @@
+prefix=/home/exbot/catkin_ws/install
+
+Name: airsim_bridge
+Description: Description of airsim_bridge
+Version: 0.0.0
+Cflags: -I/home/exbot/catkin_ws/install/include
+Libs: -L/home/exbot/catkin_ws/install/lib 
+Requires: message_runtime
