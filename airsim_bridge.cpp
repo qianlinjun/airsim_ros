@@ -87,23 +87,24 @@ public:
     connect_publish_thread.join();
   }
   
-private:  
-  //类加载时首先调用onInit函数  onInit方法不能被阻塞，只用于初始化，
-  //如果需要执行循环任务，要将其放入线程中执行。
+private:
   virtual void onInit()
   {
     ros::NodeHandle& nh = getNodeHandle();
-    ros::NodeHandle& private_nh = getPrivateNodeHandle();//for read parameters
-  
-    //pub = private_nh.advertise<std_msgs::Float64>("out", 10);  
-    //sub = private_nh.subscribe("in", 10, &Plus::callback, this); 
-
-    //AirSim
+    ros::NodeHandle& private_nh = getPrivateNodeHandle();//用来获取参数
+    //AirSim无人机
     private_nh.getParam("airsim_ip", airsim_ip);
     private_nh.getParam("airsim_port", airsim_port);
     client = new msr::airlib::MultirotorRpcLibClient(airsim_ip, airsim_port);
-    
-    
+    //相机参数
+    private_nh.getParam("Tx",Tx);
+    private_nh.getParam("Fx",Fx);
+    private_nh.getParam("Fy",Fy);
+    private_nh.getParam("cx",cx);
+    private_nh.getParam("cy",cy);
+    private_nh.getParam("colums",colums);
+    private_nh.getParam("rows",rows);
+    setCameraParams();
     //控制参数
     private_nh.getParam("pitch", pitch);
     private_nh.getParam("roll", roll);
@@ -114,28 +115,19 @@ private:
     private_nh.getParam("kP", kP);
     private_nh.getParam("kI", kI);
     private_nh.getParam("kD", kD);
-    
+    pid.setParam(kP,kI,kD);
     
     private_nh.getParam("image_freq", image_freq);
-    // private_nh.getParam("topic_depthImage", topic_depthImage);
+    if(image_freq == 0)image_freq = 1;
     private_nh.getParam("CLCT_DATA", CLCT_DATA);
-    private_nh.getParam("ManualMODE", ManualMODE);
-
+    private_nh.getParam("ManualMODE", ManualMODE);//是否手动控制
     //发布图像
     image_transport::ImageTransport it(nh);
     pub_cameraInfo = it.advertiseCamera("image_rect", 1);
- 
-    if(image_freq == 0)
-        image_freq = 1;
-        
-    getCameraParams(private_nh);
-    
-    signal(SIGINT,quit);
-    
-    pid.setParam(kP,kI,kD);
-    connect_publish_thread.start(&AirsimBridge::connect_publishAirSim, *this);
-  }//onInit
-  
+
+    signal(SIGINT,quit);//响应ctrl + c
+    connect_publish_thread.start(&AirsimBridge::connect_publishAirSim, *this);//新线程
+  }//类加载时首先调用onInit函数  onInit方法不能被阻塞，只用于初始化，如果需要执行循环任务，要将其放入线程中执行。
   
   
   
@@ -148,12 +140,9 @@ private:
      client->armDisarm(true);
      //std::cout << "Press Enter to takeoff" << std::endl; std::cin.get();
      float takeoffTimeout = 5; 
-     client->takeoff();
+     //client->takeoff();
      //std::this_thread::sleep_for(std::chrono::duration<double>(3));
      //client->hover();
-    //const float speed = 0.2f;
-    //const float size = 0.5f; 
-    //const float duration = size / speed;
    
    
    
@@ -161,7 +150,6 @@ private:
     char c;
     if(ManualMODE)
     { 
-      // get the console in raw mode 
       tcgetattr(kfd, &cooked); // 得到 termios 结构体保存，然后重新配置终端
       memcpy(&raw, &cooked, sizeof(struct termios));
       raw.c_lflag &=~ (ICANON | ECHO);
@@ -169,7 +157,9 @@ private:
       raw.c_cc[VEOF] = 2;
       tcsetattr(kfd, TCSANOW, &raw);
     }
-
+   cout<<"Tx"<<Tx<<endl;
+    
+    cvMat_frontDepth2.create(rows,colums , CV_32FC1);//获取深度信息
 
     //数字识别
     //训练
@@ -188,18 +178,19 @@ private:
     //接收windows数据
     while (ros::ok())
     {
-      ros::Time start_hook_t = ros::Time::now(); //计算处理时间
       std::vector<ImageRequest> request = {ImageRequest(0, ImageType::DepthPerspective),
+                                           ImageRequest(0, ImageType::DepthPerspective, true),
                                            ImageRequest(0, ImageType::Scene),
                                            ImageRequest(3, ImageType::Scene)};
       const std::vector<ImageResponse>& responses = client->simGetImages(request);
       
-      if(frameNum%100==0)
-        ROS_INFO("received image responses size:%lu, total size:%zu",responses.size(),frameNum);
+      //if(frameNum%100==0)
+        //ROS_INFO("received image responses size:%lu, total size:%zu",responses.size(),frameNum);
       if (responses.size() > 0) {
            const ImageResponse& response_frontDepth = responses[0];
-           const ImageResponse& response_frontScene = responses[1];
-           const ImageResponse& response_groundScene = responses[2];
+           const ImageResponse& response_frontDepth2 = responses[1];
+           const ImageResponse& response_frontScene  = responses[2];
+           const ImageResponse& response_groundScene = responses[3];
            realHeight = -response_groundScene.camera_position.z();//飞机离地高度
 
             //时间戳 保证深度图和相机信息以及tf同步
@@ -215,10 +206,27 @@ private:
             cvMat_frontDepth = cv::imdecode(response_frontDepth.image_data_uint8, cv::IMREAD_GRAYSCALE);
             //cv::imshow("frontDepth",cvMat_frontDepth);
             //cv::waitKey(1);
+            
+            ros::Time start_hook_t = ros::Time::now(); //计算处理时间
+            ROS_INFO("response_frontDepth2 size:%lu",response_frontDepth2.image_data_float.size());
+            float* pData = (float*)cvMat_frontDepth2.data;  
+            for(size_t i=0;i < response_frontDepth2.image_data_float.size(); ++i)
+            {
+            //cout<<"*pData"<<*pData<<endl;
+               if(response_frontDepth2.image_data_float[i] <= 1.0)
+                 *pData = 255;
+               else
+                 *pData = 255/response_frontDepth2.image_data_float[i];
+               pData++;  
+            }
+            cv::imshow("cvMat_frontDepth2",cvMat_frontDepth2);
+                
+            //计算程序运行时间
+            ros::Time end_hook_t = ros::Time::now();
+            //ROS_INFO_STREAM("process time "<< (((end_hook_t - start_hook_t).toSec())));
+            
             cv_bridge::CvImage(header, "32FC1", cvMat_frontDepth).toImageMsg(msgDepth);  
             msgCameraInfo.header.stamp = timestamp;
-            msgCameraInfo.height = response_frontDepth.height;
-            msgCameraInfo.width = response_frontDepth.width;
             pub_cameraInfo.publish(msgDepth,msgCameraInfo);
             
             //获得前视和下视彩色图
@@ -270,20 +278,13 @@ private:
               savePicture(cvMat_frontScene,cvMat_groundScene,cvMat_frontDepth,frameNum,-response_frontDepth.camera_position.z()); 
           }else{
              if(M1_ON)
-                ProcM1();
-             else
-                ProcM2();   
+                ProcM1();  
           }
 
           ++frameNum;
        }//if
-      
-        
-       //计算程序运行时间
-       ros::Time end_hook_t = ros::Time::now();
-       //ROS_INFO_STREAM("decode "<< (((end_hook_t - start_hook_t).toSec()*1e9)));
        
-       r.sleep();
+       //r.sleep();
        //ros::spinOnce();
     }//while
   }//thread
@@ -320,47 +321,25 @@ private:
       
   }
   
-  void ProcM2()
-  {      /*cv::Mat imageHSV,image_S,image_V;
-      cv::cvtColor(cvMat_groundScene, imageHSV, CV_BGR2HSV);     //将image转到HSV空间
-      
-      image_S.create(imageHSV.size(), imageHSV.depth());   //定义与imageHSV同尺寸和深度的图像image_H
-      image_V.create(imageHSV.size(), imageHSV.depth());
-      int ch1[] = { 1, 0 };//将imageHSV的S层(1)复制到image_S(0)
-      int ch2[] = { 2, 0 };//将imageHSV的V层(2)复制到image_V(0)
-      cv::mixChannels(&imageHSV, 1, &image_S, 1, ch1, 1);
-      cv::mixChannels(&imageHSV, 1, &image_V, 1, ch2, 1); 
-      imshow("image_S",image_S);
-      imshow("image_V",image_V);
-      cv::waitKey(20);*/
-  }
-  
   //获取相机内参
-  void getCameraParams(const ros::NodeHandle& nh)
+  void setCameraParams()
   {
-      double Tx, Fx, Fy, cx, cy, width, height;
-      nh.getParam("Tx",Tx);
-      nh.getParam("Fx",Fx);
-      nh.getParam("Fy",Fy);
-      nh.getParam("cx",cx);
-      nh.getParam("cy",cy);
       msgCameraInfo.header.frame_id = "camera";
+      msgCameraInfo.height = rows;
+      msgCameraInfo.width = colums;
       //The distortion parameters, size depending on the distortion model.
       //For "plumb_bob", the 5 parameters are: (k1, k2, t1, t2, k3).
       msgCameraInfo.distortion_model = "plumb_bob";//畸变
       msgCameraInfo.D = {0.0, 0.0, 0.0, 0.0, 0.0};
-      //投影矩阵(内参)
       msgCameraInfo.K = {Fx,  0.0, cx, 
                        0.0, Fy,  cy, 
-                       0.0, 0.0, 1};
-      //旋转矩阵
+                       0.0, 0.0, 1};//投影矩阵(内参)
       msgCameraInfo.R = {1.0, 0.0, 0.0, 
                        0.0, 1.0, 0.0,
-                       0.0, 0.0, 1.0};
-      //立体相机
+                       0.0, 0.0, 1.0};//旋转矩阵
       msgCameraInfo.P = {Fx,  0.0, cx,  Tx, 
                        0.0, Fy,  cy,  0.0, 
-                       0.0, 0.0, 1.0, 0.0};
+                       0.0, 0.0, 1.0, 0.0};//立体相机
       /*微软python获得点云示例代码中的投影矩阵
       projectionMatrix = np.array([[-0.501202762, 0.000000000, 0.000000000, 0.000000000],
                                 [0.000000000, -0.501202762, 0.000000000, 0.000000000],
@@ -461,6 +440,10 @@ private:
    int     image_freq=1;//获取图像频率
    string  topic_depthImage="";//发布话题
    
+   //相机参数
+   double Tx, Fx, Fy, cx, cy;
+   int rows, colums;
+   
    //无人机参数
    float pitch, roll, throttle, yaw_rate, duration;
    //pid
@@ -472,7 +455,8 @@ private:
    //sensor_msgs::ImagePtr msgDepth;
    cv::Mat cvMat_frontScene;//前视图
    cv::Mat cvMat_groundScene;//下视图
-   cv::Mat cvMat_frontDepth;//深度图
+   cv::Mat cvMat_frontDepth;//深度图(uint8)
+   cv::Mat cvMat_frontDepth2;//深度图(float)
    
    //发布深度图 生成点云
    image_transport::CameraPublisher pub_cameraInfo;
