@@ -121,6 +121,7 @@ private:
     if(image_freq == 0)image_freq = 1;
     private_nh.getParam("CLCT_DATA", CLCT_DATA);
     private_nh.getParam("ManualMODE", ManualMODE);//是否手动控制
+    private_nh.getParam("SAVE_PICTURE", SAVE_PICTURE);//是否手动控制
     //发布图像
     image_transport::ImageTransport it(nh);
     pub_cameraInfo = it.advertiseCamera("image_rect", 1);
@@ -178,11 +179,14 @@ private:
     //接收windows数据
     while (ros::ok())
     {
+    ros::Time start_hook_t = ros::Time::now(); //计算处理时间
       std::vector<ImageRequest> request = {ImageRequest(0, ImageType::DepthPerspective),
                                            ImageRequest(0, ImageType::DepthPerspective, true),
                                            ImageRequest(0, ImageType::Scene),
                                            ImageRequest(3, ImageType::Scene)};
       const std::vector<ImageResponse>& responses = client->simGetImages(request);
+                  //计算程序运行时间
+            
       
       //if(frameNum%100==0)
         //ROS_INFO("received image responses size:%lu, total size:%zu",responses.size(),frameNum);
@@ -194,8 +198,8 @@ private:
            realHeight = -response_groundScene.camera_position.z();//飞机离地高度
 
             //时间戳 保证深度图和相机信息以及tf同步
-            uint32_t timestamp_s = uint32_t(response_frontScene.time_stamp / 1000000000);
-            uint32_t timestamp_ns = uint32_t(response_frontScene.time_stamp % 1000000000);
+            uint32_t timestamp_s = uint32_t(response_frontDepth.time_stamp / 1000000000);
+            uint32_t timestamp_ns = uint32_t(response_frontDepth.time_stamp % 1000000000);
             ros::Time timestamp(timestamp_s, timestamp_ns);
             //msg 头包括时间戳和坐标系戳
             std_msgs::Header header;
@@ -204,27 +208,15 @@ private:
 
             //发布深度图和相机参数 到 image process制作点云
             cvMat_frontDepth = cv::imdecode(response_frontDepth.image_data_uint8, cv::IMREAD_GRAYSCALE);
-            //cv::imshow("frontDepth",cvMat_frontDepth);
-            //cv::waitKey(1);
             
-            ros::Time start_hook_t = ros::Time::now(); //计算处理时间
-            ROS_INFO("response_frontDepth2 size:%lu",response_frontDepth2.image_data_float.size());
+            
+            
+            //ROS_INFO("response_frontDepth2 size:%lu",response_frontDepth2.image_data_float.size());
             float* pData = (float*)cvMat_frontDepth2.data;  
             for(size_t i=0;i < response_frontDepth2.image_data_float.size(); ++i)
-            {
-            //cout<<"*pData"<<*pData<<endl;
-               if(response_frontDepth2.image_data_float[i] <= 1.0)
-                 *pData = 255;
-               else
-                 *pData = 255/response_frontDepth2.image_data_float[i];
-               pData++;  
-            }
-            cv::imshow("cvMat_frontDepth2",cvMat_frontDepth2);
-                
-            //计算程序运行时间
-            ros::Time end_hook_t = ros::Time::now();
-            //ROS_INFO_STREAM("process time "<< (((end_hook_t - start_hook_t).toSec())));
-            
+                *pData++ = response_frontDepth2.image_data_float[i];
+            //cout<<"336 166:"<<cvMat_frontDepth2.at<float>(170,185)<<endl;
+  
             cv_bridge::CvImage(header, "32FC1", cvMat_frontDepth).toImageMsg(msgDepth);  
             msgCameraInfo.header.stamp = timestamp;
             pub_cameraInfo.publish(msgDepth,msgCameraInfo);
@@ -232,9 +224,11 @@ private:
             //获得前视和下视彩色图
             cvMat_frontScene = cv::imdecode(response_frontScene.image_data_uint8, cv::IMREAD_COLOR  );//前视图
             cvMat_groundScene = cv::imdecode(response_groundScene.image_data_uint8, cv::IMREAD_COLOR  );//下视图
-            /*v::imshow("frontScene",cvMat_frontScene);
-            cv::imshow("groundScene",cvMat_groundScene);
-            cv::waitKey(1);*/
+            ///cv::imshow("frontScene",cvMat_frontScene);
+            //cv::imshow("groundScene",cvMat_groundScene);
+            //cv::imshow("frontDepth",cvMat_frontDepth);
+            //cv::imshow("cvMat_frontDepth2",cvMat_frontDepth2);//显示有问题
+            cv::waitKey(10);
             
             //发布相机 tf坐标树 和点云制作octomap
             tfPublish(getCameraPose(response_frontDepth), timestamp);
@@ -272,16 +266,18 @@ private:
                 break;
               //default:
                 //cout<<"hello"<<endl;//printf("value: %c = 0x%02X = %d\n", c, c, c);
-            }       
-            //保存图片
-            if(frameNum % 2 == 0)
-              savePicture(cvMat_frontScene,cvMat_groundScene,cvMat_frontDepth,frameNum,-response_frontDepth.camera_position.z()); 
+            }
           }else{
              if(M1_ON)
                 ProcM1();  
           }
-
+          
+          //保存图片
+          if(SAVE_PICTURE)
+            savePicture(cvMat_frontScene,cvMat_groundScene,cvMat_frontDepth,frameNum);
           ++frameNum;
+          ros::Time end_hook_t = ros::Time::now();
+            //ROS_INFO_STREAM("process time "<< (((end_hook_t - start_hook_t).toSec())));
        }//if
        
        //r.sleep();
@@ -303,19 +299,19 @@ private:
       //矩形识别
       cv::Mat resultImage1;
       
-      bool ifFindSquares = rectRecog.findSquares(cvMat_groundScene, resultImage1);
-      if(ifFindSquares)
-      {
+      //bool ifFindSquares = rectRecog.findSquares(cvMat_groundScene, resultImage1);
+      //if(ifFindSquares)
+      //{
         //int number = numRecong.getNumber(resultImage1);
         //cout<<"number:"<<number<<endl;
-      }
+     // }
 
       
-      targetHeight= 10;
+      targetHeight= 3;
       double error = targetHeight - realHeight;
-      throttle = pid.getOutputByPos(error);
+     // throttle = pid.getOutputByPos(error);
       //-0.00002, -0.00001
-      client->moveByAngleThrottle(0,0,throttle,0,duration);
+      //client->moveByAngleThrottle(-0.002, -0.001,throttle,0,duration);
       cout<<"realHeight"<<realHeight<<"  "<<"throttle:"<<throttle<<endl;
       
       
@@ -398,7 +394,7 @@ private:
   
   
   //储存数据
-  void savePicture(const cv::Mat& frontScene,const cv::Mat& groundScene,const cv::Mat& depth,int framenum,const float height)
+  void savePicture(const cv::Mat& frontScene,const cv::Mat& groundScene,const cv::Mat& depth,int framenum)
   {
       std::vector<int> compression_params;
       compression_params.push_back(CV_IMWRITE_PNG_COMPRESSION); //PNG格式图片的压缩级别    
@@ -411,17 +407,17 @@ private:
       
       char path0[255]={0};
       memset(path0,'\0',sizeof(char)*255);
-      sprintf(path0,"%sframe_%04d_%f%s",prefix1,framenum,height,postfix);
+      sprintf(path0,"%sframe_%04d%s",prefix1,framenum,postfix);
       imwrite(path0,frontScene);
       
       char path1[255]={0};
       memset(path1,'\0',sizeof(char)*255);
-      sprintf(path1,"%sframe_%04d_%f%s",prefix2,framenum,height,postfix);
+      sprintf(path1,"%sframe_%04d%s",prefix2,framenum,postfix);
       imwrite(path1,groundScene);
       
       char path2[255]={0};
       memset(path2,'\0',sizeof(char)*255);
-      sprintf(path2,"%sframe_%04d_%f%s",prefix3,framenum,height,postfix);
+      sprintf(path2,"%sframe_%04d%s",prefix3,framenum,postfix);
       imwrite(path2,depth);
   }
   
@@ -475,6 +471,7 @@ private:
    
    bool CLCT_DATA;//决定是否显示处理时间
    bool ManualMODE;//手动模式控制无人机并保存摄像头数据
+   bool SAVE_PICTURE;//是否保存图片
    
    bool M1_ON = true;//正在进行任务1
    
