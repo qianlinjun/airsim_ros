@@ -127,6 +127,11 @@ private:
     pub_cameraInfo = it.advertiseCamera("image_rect", 1);
 
     signal(SIGINT,quit);//响应ctrl + c
+    
+    //数字２ 3
+    targetList[2].ground_vertical = 0;//地面
+    targetList[3].ground_vertical = 0;//地面
+    
     connect_publish_thread.start(&AirsimBridge::connect_publishAirSim, *this);//新线程
   }//类加载时首先调用onInit函数  onInit方法不能被阻塞，只用于初始化，如果需要执行循环任务，要将其放入线程中执行。
   
@@ -141,12 +146,11 @@ private:
      client->armDisarm(true);
      //std::cout << "Press Enter to takeoff" << std::endl; std::cin.get();
      float takeoffTimeout = 5; 
-     //client->takeoff();
+     client->takeoff();
      //std::this_thread::sleep_for(std::chrono::duration<double>(3));
      //client->hover();
    
-   
-   
+
    //处理键盘事件 
     char c;
     if(ManualMODE)
@@ -160,123 +164,95 @@ private:
     }
    cout<<"Tx"<<Tx<<endl;
     
-    cvMat_frontDepth2.create(rows,colums , CV_32FC1);//获取深度信息
+    
 
     //数字识别
     //训练
     //numRecong.trainmodel();
     
-    
     //识别
     const char *model_file_name = "/home/exbot/catkin_ws/src/airsim_bridge/src/ImageProc/NumRecog/model/libsvm_hog_minist_model.model";
     numRecong.loadModel(model_file_name);
 
-  
-    targetNumber = 2;
+
     ros::Rate r(image_freq);
-    size_t frameNum=0;
-    
+    std::vector<ImageRequest> request = {ImageRequest(0, ImageType::DepthPerspective),//深度图(uint8)
+                                         ImageRequest(0, ImageType::DepthPerspective, true),//深度图(float)
+                                         ImageRequest(0, ImageType::Scene),//前视彩图
+                                         ImageRequest(3, ImageType::Scene),//对地彩图
+                                         ImageRequest(0, ImageType::DepthVis)};//深度图(显示)
     //接收windows数据
     while (ros::ok())
     {
-    ros::Time start_hook_t = ros::Time::now(); //计算处理时间
-      std::vector<ImageRequest> request = {ImageRequest(0, ImageType::DepthPerspective),
-                                           ImageRequest(0, ImageType::DepthPerspective, true),
-                                           ImageRequest(0, ImageType::Scene),
-                                           ImageRequest(3, ImageType::Scene)};
-      const std::vector<ImageResponse>& responses = client->simGetImages(request);
-                  //计算程序运行时间
-            
-      
-      //if(frameNum%100==0)
-        //ROS_INFO("received image responses size:%lu, total size:%zu",responses.size(),frameNum);
+      ros::Time start_hook_t = ros::Time::now(); //计算处理时间
+      const std::vector<ImageResponse>& responses = client->simGetImages(request);   
       if (responses.size() > 0) {
-           const ImageResponse& response_frontDepth = responses[0];
-           const ImageResponse& response_frontDepth2 = responses[1];
+           const ImageResponse& response_frontDepth　= responses[0];
+           const ImageResponse& response_frontDepthReal　= responses[1];
            const ImageResponse& response_frontScene  = responses[2];
            const ImageResponse& response_groundScene = responses[3];
-           realHeight = -response_groundScene.camera_position.z();//飞机离地高度
+           const ImageResponse& response_depthVis = responses[4]; 
+           cv::Mat cvMat_frontDepthVis = cv::imdecode(response_depthVis.image_data_uint8, cv::IMREAD_GRAYSCALE);
 
-            //时间戳 保证深度图和相机信息以及tf同步
-            uint32_t timestamp_s = uint32_t(response_frontDepth.time_stamp / 1000000000);
-            uint32_t timestamp_ns = uint32_t(response_frontDepth.time_stamp % 1000000000);
-            ros::Time timestamp(timestamp_s, timestamp_ns);
-            //msg 头包括时间戳和坐标系戳
-            std_msgs::Header header;
-            header.stamp = timestamp;
-            header.frame_id = "camera";           
-
-            //发布深度图和相机参数 到 image process制作点云
-            cvMat_frontDepth = cv::imdecode(response_frontDepth.image_data_uint8, cv::IMREAD_GRAYSCALE);
-            
-            
-            
-            //ROS_INFO("response_frontDepth2 size:%lu",response_frontDepth2.image_data_float.size());
-            float* pData = (float*)cvMat_frontDepth2.data;  
-            for(size_t i=0;i < response_frontDepth2.image_data_float.size(); ++i)
-                *pData++ = response_frontDepth2.image_data_float[i];
-            //cout<<"336 166:"<<cvMat_frontDepth2.at<float>(170,185)<<endl;
-  
-            cv_bridge::CvImage(header, "32FC1", cvMat_frontDepth).toImageMsg(msgDepth);  
-            msgCameraInfo.header.stamp = timestamp;
-            pub_cameraInfo.publish(msgDepth,msgCameraInfo);
-            
-            //获得前视和下视彩色图
-            cvMat_frontScene = cv::imdecode(response_frontScene.image_data_uint8, cv::IMREAD_COLOR  );//前视图
-            cvMat_groundScene = cv::imdecode(response_groundScene.image_data_uint8, cv::IMREAD_COLOR  );//下视图
             ///cv::imshow("frontScene",cvMat_frontScene);
             //cv::imshow("groundScene",cvMat_groundScene);
             //cv::imshow("frontDepth",cvMat_frontDepth);
-            //cv::imshow("cvMat_frontDepth2",cvMat_frontDepth2);//显示有问题
-            cv::waitKey(10);
+            //cv::imshow("cvMat_frontDepthReal",cvMat_frontDepthReal);//显示有问题
+            //cv::imshow("cvMat_frontDepthVis",cvMat_frontDepthVis);//显示深度
+            //cv::waitKey(10);
             
-            //发布相机 tf坐标树 和点云制作octomap
-            tfPublish(getCameraPose(response_frontDepth), timestamp);
+            
+            //时间戳 保证深度图和相机信息以及tf同步
+            uint32_t timestamp_s = uint32_t(response_frontDepth.time_stamp / 1000000000);
+            uint32_t timestamp_ns = uint32_t(response_frontDepth.time_stamp % 1000000000);
+            ros::Time timestamp(timestamp_s, timestamp_ns);   
+            depthPublish(response_frontDepth,timestamp);//发布深度图和相机参数 到 image process制作点云
+            tfPublish(getCameraPose(response_frontDepth), timestamp);//发布相机 tf坐标树 和点云制作octomap
           
           
-          
-          //手动控制模式并保存图像
-          if(ManualMODE)
-          {
-            if(read(kfd, &c, 1) < 0)
+            //手动控制模式并保存图像
+            if(ManualMODE)
             {
-              perror("read():");
-              exit(-1);
+              if(read(kfd, &c, 1) < 0)
+              {
+                perror("read():");
+                exit(-1);
+              }
+
+              switch(c)
+              {
+                case KEYCODE_L:
+                  client->moveByAngleThrottle(0, -roll, throttle, 0, duration);
+                  break;
+                case KEYCODE_R:
+                  client->moveByAngleThrottle(0, roll, throttle, 0, duration);
+                  break;
+                case KEYCODE_U:
+                  client->moveByAngleThrottle(-pitch, 0, throttle, 0, duration);
+                  break;
+                case KEYCODE_D:
+                  client->moveByAngleThrottle(pitch, 0, throttle, 0, duration);
+                  break;
+                case KEYCODE_W:
+                  client->moveByAngleThrottle(0.0001, 0, 0.65, 0, duration);
+                  break;
+                case KEYCODE_S:
+                  client->moveByAngleThrottle(0.0001, 0, 0.55, 0, duration);
+                  break;
+                //default:
+                  //cout<<"hello"<<endl;//printf("value: %c = 0x%02X = %d\n", c, c, c);
+              }
+            }else{
+               if(M1_ON)
+                  goMission1(response_frontScene,
+                             response_frontDepthReal,
+                             response_groundScene);  
             }
 
-            switch(c)
-            {
-              case KEYCODE_L:
-                client->moveByAngleThrottle(0, -roll, throttle, 0, duration);
-                break;
-              case KEYCODE_R:
-                client->moveByAngleThrottle(0, roll, throttle, 0, duration);
-                break;
-              case KEYCODE_U:
-                client->moveByAngleThrottle(-pitch, 0, throttle, 0, duration);
-                break;
-              case KEYCODE_D:
-                client->moveByAngleThrottle(pitch, 0, throttle, 0, duration);
-                break;
-              case KEYCODE_W:
-                client->moveByAngleThrottle(0.0001, 0, 0.65, 0, duration);
-                break;
-              case KEYCODE_S:
-                client->moveByAngleThrottle(0.0001, 0, 0.55, 0, duration);
-                break;
-              //default:
-                //cout<<"hello"<<endl;//printf("value: %c = 0x%02X = %d\n", c, c, c);
-            }
-          }else{
-             if(M1_ON)
-                ProcM1();  
-          }
-          
-          //保存图片
-          if(SAVE_PICTURE)
-            savePicture(cvMat_frontScene,cvMat_groundScene,cvMat_frontDepth,frameNum);
-          ++frameNum;
-          ros::Time end_hook_t = ros::Time::now();
+            ++frameNum;
+            //if(frameNum%100==0)
+             //ROS_INFO("received image responses size:%lu, total size:%zu",responses.size(),frameNum);
+            ros::Time end_hook_t = ros::Time::now();
             //ROS_INFO_STREAM("process time "<< (((end_hook_t - start_hook_t).toSec())));
        }//if
        
@@ -286,36 +262,90 @@ private:
   }//thread
   
   
-  typedef struct Target
-  {
-    int targetNumber;//目标数字
-    int ground_vertical;//数字地面(0)还是垂直(1)
-    
-  }Target;
   
   //转圈任务
-  void ProcM1()
+  void goMission1(const ImageResponse& response_frontScene,
+                  const ImageResponse& response_frontDepthReal,
+                  const ImageResponse& response_groundScene)
+  {        
+        //获得前视和下视彩色图
+       cv::Mat　cvMat_frontScene = cv::imdecode(response_frontScene.image_data_uint8, cv::IMREAD_COLOR);//前视图
+       cv::Mat　cvMat_groundScene = cv::imdecode(response_groundScene.image_data_uint8, cv::IMREAD_COLOR);//下视图
+       cv::Mat　cvMat_frontDepthReal.create(rows,colums , CV_32FC1);//获取深度信息
+       double targetHeight= 3;
+       double　realHeight　= -response_groundScene.camera_position.z();//飞机离地高度
+       float* pData = (float*)cvMat_frontDepthReal.data;  
+        for(size_t i=0;i < response_frontDepthReal.image_data_float.size(); ++i)
+        {
+             //cout<<*pData<<endl;
+             if(response_frontDepthReal.image_data_float[i]>100)
+                 *pData++ = 100;
+             else
+                 *pData++ = response_frontDepthReal.image_data_float[i];
+        } 
+          //保存图片
+        if(SAVE_PICTURE)
+          savePicture(cvMat_frontScene,cvMat_groundScene,cvMat_frontDepthReal,frameNum);
+              
+      //观察环境（图像以及自身位置）更新目标列表
+      observeEnvironment(cvMat_frontScene,
+                         cvMat_groundScene,
+                         cvMat_frontDepthReal);
+      //搜索数字位置
+      if(targetList(targetNumber).findLoc)
+      {
+      　//飞到对应位置
+       //如果在位置范围内执行相应策略
+      }else{
+        int ground_vertical = targetList(targetNumber).ground_vertical;
+        if(ground_vertical==0)
+        {
+          //飞高
+        }
+        else if(ground_vertical==1)
+        {
+          //环视　平移
+        }else{
+        //不知道位置
+        //策略
+        }
+      }     
+      
+      double error = targetHeight - realHeight;
+      throttle = pid.getOutputByPos(error);
+      //-0.00002, -0.00001
+      client->moveByAngleThrottle(-0.002, -0.001,throttle,0,duration);
+      cout<<"realHeight"<<realHeight<<"  "<<"throttle:"<<throttle<<endl;
+  }
+  
+  
+   //前视和下视彩色图
+  void observeEnvironment(const cv::Mat& frontScene,
+                          const cv::Mat& groundScene,
+                          const vector<float>& depthData)
   {
-      //矩形识别
+      for (int i = 0; i < image_S.rows; i++)
+      {
+          uchar* data = image_S.ptr<uchar>(i);
+          for (int j = 0; j < image_S.cols; j++)
+          {
+              if (data[j] >= 0 && data[j] <= 20)
+                  data[j] = 0;
+              else
+                  data[j] = 255;
+          }
+      }
+        //矩形识别
       cv::Mat resultImage1;
       
-      //bool ifFindSquares = rectRecog.findSquares(cvMat_groundScene, resultImage1);
-      //if(ifFindSquares)
-      //{
-        //int number = numRecong.getNumber(resultImage1);
-        //cout<<"number:"<<number<<endl;
-     // }
-
-      
-      targetHeight= 3;
-      double error = targetHeight - realHeight;
-     // throttle = pid.getOutputByPos(error);
-      //-0.00002, -0.00001
-      //client->moveByAngleThrottle(-0.002, -0.001,throttle,0,duration);
-      cout<<"realHeight"<<realHeight<<"  "<<"throttle:"<<throttle<<endl;
-      
-      
+      bool = rectRecog.findSquares(cvMat_groundScene, resultImage1);
+      if(ifFindSquares)
+      {
+        int number = numRecong.getNumber(resultImage1);
+        cout<<"number:"<<number<<endl;
+     }
   }
+  
   
   //获取相机内参
   void setCameraParams()
@@ -345,7 +375,20 @@ private:
       msgCameraInfo.binning_y = 0;
   }
   
-  
+  //发布深度图
+  void depthPublish(const ImageResponse& response_frontDepth, const ros::Time& timestamp)
+  {
+      //msg 头包括时间戳和坐标系戳
+      std_msgs::Header header;
+      header.stamp = timestamp;
+      header.frame_id = "camera";           
+
+      cv::Mat cvMat_frontDepth = cv::imdecode(response_frontDepth.image_data_uint8, cv::IMREAD_GRAYSCALE);//深度图(uint8)
+      sensor_msgs::Image msgDepth;
+      cv_bridge::CvImage(header, "32FC1", cvMat_frontDepth).toImageMsg(msgDepth);  
+      msgCameraInfo.header.stamp = timestamp;
+      pub_cameraInfo.publish(msgDepth,msgCameraInfo);
+  }
   //获得相机位姿
   geometry_msgs::Pose getCameraPose(const ImageResponse& response_frontDepth)
   {
@@ -384,7 +427,7 @@ private:
     //the point of camera origin in world coordinate 
     transformCamera.setOrigin(tf::Vector3(CamPose.position.y,
                                           CamPose.position.x,
-                                          -CamPose.position.z));
+                                         -CamPose.position.z));
     transformCamera.setRotation(tf::Quaternion(CamPose.orientation.x, 
                                                CamPose.orientation.y, 
                                                CamPose.orientation.z,
@@ -429,41 +472,47 @@ private:
   }*/
 
 
+
+
+
+private:
    //Airsim参数
    MultirotorRpcLibClient* client;
    string  airsim_ip;//服务端地址
    int     airsim_port;//端口
    int     image_freq=1;//获取图像频率
    string  topic_depthImage="";//发布话题
+   size_t frameNum=0;//帧数
    
    //相机参数
    double Tx, Fx, Fy, cx, cy;
-   int rows, colums;
    
    //无人机参数
    float pitch, roll, throttle, yaw_rate, duration;
    //pid
    PID pid;
    double kP, kI, kD, kN;
-   double targetHeight,realHeight; 
    
    //图像相关
    //sensor_msgs::ImagePtr msgDepth;
-   cv::Mat cvMat_frontScene;//前视图
-   cv::Mat cvMat_groundScene;//下视图
-   cv::Mat cvMat_frontDepth;//深度图(uint8)
-   cv::Mat cvMat_frontDepth2;//深度图(float)
-   
    //发布深度图 生成点云
    image_transport::CameraPublisher pub_cameraInfo;
-   sensor_msgs::Image msgDepth;
+   
    sensor_msgs::CameraInfo msgCameraInfo;//相机内参
-   //ros::Subscriber sub;
    
    //数字识别
    NumRecog numRecong;
    RectRecog rectRecog;
-   int targetNumber;//目标数字
+   int targetNumber = 2;//目标数字
+   
+   
+   typedef struct Target
+   {
+      int ground_vertical = -1;//未知(-1)数字地面(0)还是垂直(1)
+      bool findLoc = bool;//是否发现目标位置
+      geometry_msgs::Vector3 location;//目标大概位置
+   }Target;
+   std::vector<Target> targetList(11);//0-10 方便写代码
    
    //新建线程进行阻塞操作
    ecl::Thread connect_publish_thread;
