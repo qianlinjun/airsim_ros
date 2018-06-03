@@ -102,8 +102,6 @@ private:
     private_nh.getParam("Fy",Fy);
     private_nh.getParam("cx",cx);
     private_nh.getParam("cy",cy);
-    private_nh.getParam("colums",colums);
-    private_nh.getParam("rows",rows);
     setCameraParams();
     //控制参数
     private_nh.getParam("pitch", pitch);
@@ -128,6 +126,7 @@ private:
 
     signal(SIGINT,quit);//响应ctrl + c
     
+    targetList.resize(11);//2-10 填11方便写代码
     //数字２ 3
     targetList[2].ground_vertical = 0;//地面
     targetList[3].ground_vertical = 0;//地面
@@ -176,32 +175,27 @@ private:
 
 
     ros::Rate r(image_freq);
-    std::vector<ImageRequest> request = {ImageRequest(0, ImageType::DepthPerspective),//深度图(uint8)
-                                         ImageRequest(0, ImageType::DepthPerspective, true),//深度图(float)
+    std::vector<ImageRequest> request = {ImageRequest(0, ImageType::DepthPerspective),//深度图(uint8)制作点云
+                                         ImageRequest(0, ImageType::DepthPerspective, true),//深度图(float)获取目标
                                          ImageRequest(0, ImageType::Scene),//前视彩图
-                                         ImageRequest(3, ImageType::Scene),//对地彩图
-                                         ImageRequest(0, ImageType::DepthVis)};//深度图(显示)
+                                         ImageRequest(3, ImageType::Scene)};//对地彩图
     //接收windows数据
     while (ros::ok())
     {
       ros::Time start_hook_t = ros::Time::now(); //计算处理时间
       const std::vector<ImageResponse>& responses = client->simGetImages(request);   
       if (responses.size() > 0) {
-           const ImageResponse& response_frontDepth　= responses[0];
-           const ImageResponse& response_frontDepthReal　= responses[1];
-           const ImageResponse& response_frontScene  = responses[2];
+           const ImageResponse& response_frontDepth = responses[0];
+           const ImageResponse& response_frontDepthReal = responses[1];
+           const ImageResponse& response_frontScene = responses[2];
            const ImageResponse& response_groundScene = responses[3];
-           const ImageResponse& response_depthVis = responses[4]; 
-           cv::Mat cvMat_frontDepthVis = cv::imdecode(response_depthVis.image_data_uint8, cv::IMREAD_GRAYSCALE);
-
-            ///cv::imshow("frontScene",cvMat_frontScene);
+            //cv::imshow("frontScene",cvMat_frontScene);
             //cv::imshow("groundScene",cvMat_groundScene);
             //cv::imshow("frontDepth",cvMat_frontDepth);
             //cv::imshow("cvMat_frontDepthReal",cvMat_frontDepthReal);//显示有问题
             //cv::imshow("cvMat_frontDepthVis",cvMat_frontDepthVis);//显示深度
             //cv::waitKey(10);
-            
-            
+    
             //时间戳 保证深度图和相机信息以及tf同步
             uint32_t timestamp_s = uint32_t(response_frontDepth.time_stamp / 1000000000);
             uint32_t timestamp_ns = uint32_t(response_frontDepth.time_stamp % 1000000000);
@@ -209,46 +203,10 @@ private:
             depthPublish(response_frontDepth,timestamp);//发布深度图和相机参数 到 image process制作点云
             tfPublish(getCameraPose(response_frontDepth), timestamp);//发布相机 tf坐标树 和点云制作octomap
           
-          
-            //手动控制模式并保存图像
-            if(ManualMODE)
-            {
-              if(read(kfd, &c, 1) < 0)
-              {
-                perror("read():");
-                exit(-1);
-              }
-
-              switch(c)
-              {
-                case KEYCODE_L:
-                  client->moveByAngleThrottle(0, -roll, throttle, 0, duration);
-                  break;
-                case KEYCODE_R:
-                  client->moveByAngleThrottle(0, roll, throttle, 0, duration);
-                  break;
-                case KEYCODE_U:
-                  client->moveByAngleThrottle(-pitch, 0, throttle, 0, duration);
-                  break;
-                case KEYCODE_D:
-                  client->moveByAngleThrottle(pitch, 0, throttle, 0, duration);
-                  break;
-                case KEYCODE_W:
-                  client->moveByAngleThrottle(0.0001, 0, 0.65, 0, duration);
-                  break;
-                case KEYCODE_S:
-                  client->moveByAngleThrottle(0.0001, 0, 0.55, 0, duration);
-                  break;
-                //default:
-                  //cout<<"hello"<<endl;//printf("value: %c = 0x%02X = %d\n", c, c, c);
-              }
-            }else{
-               if(M1_ON)
-                  goMission1(response_frontScene,
-                             response_frontDepthReal,
-                             response_groundScene);  
-            }
-
+            //任务1
+            if(M1_ON)
+               goMission1(response_frontScene, response_groundScene, response_frontDepthReal);
+            
             ++frameNum;
             //if(frameNum%100==0)
              //ROS_INFO("received image responses size:%lu, total size:%zu",responses.size(),frameNum);
@@ -262,42 +220,31 @@ private:
   }//thread
   
   
-  
-  //转圈任务
+  //钻圈任务
   void goMission1(const ImageResponse& response_frontScene,
-                  const ImageResponse& response_frontDepthReal,
-                  const ImageResponse& response_groundScene)
-  {        
-        //获得前视和下视彩色图
-       cv::Mat　cvMat_frontScene = cv::imdecode(response_frontScene.image_data_uint8, cv::IMREAD_COLOR);//前视图
-       cv::Mat　cvMat_groundScene = cv::imdecode(response_groundScene.image_data_uint8, cv::IMREAD_COLOR);//下视图
-       cv::Mat　cvMat_frontDepthReal.create(rows,colums , CV_32FC1);//获取深度信息
-       double targetHeight= 3;
-       double　realHeight　= -response_groundScene.camera_position.z();//飞机离地高度
-       float* pData = (float*)cvMat_frontDepthReal.data;  
-        for(size_t i=0;i < response_frontDepthReal.image_data_float.size(); ++i)
-        {
-             //cout<<*pData<<endl;
-             if(response_frontDepthReal.image_data_float[i]>100)
-                 *pData++ = 100;
-             else
-                 *pData++ = response_frontDepthReal.image_data_float[i];
-        } 
-          //保存图片
-        if(SAVE_PICTURE)
-          savePicture(cvMat_frontScene,cvMat_groundScene,cvMat_frontDepthReal,frameNum);
-              
-      //观察环境（图像以及自身位置）更新目标列表
+                  const ImageResponse& response_groundScene,
+                  const ImageResponse& response_frontDepthReal)
+  {
+      cv::Mat cvMat_frontScene = cv::imdecode(response_frontScene.image_data_uint8, cv::IMREAD_COLOR);//前视图
+      cv::Mat cvMat_groundScene = cv::imdecode(response_groundScene.image_data_uint8, cv::IMREAD_COLOR);//下视图
+      const geometry_msgs::Pose frontCameraPose = getCameraPose(response_frontScene);
+      const geometry_msgs::Pose groundCameraPose = getCameraPose(response_groundScene);
+      //观察环境(图片和自身位置) 更新targetList
       observeEnvironment(cvMat_frontScene,
                          cvMat_groundScene,
-                         cvMat_frontDepthReal);
+                         response_frontDepthReal.image_data_float,
+                         frontCameraPose,
+                         groundCameraPose);
+      double targetHeight = 3;
+      double realHeight = groundCameraPose.position.z;//飞机离地高度
       //搜索数字位置
-      if(targetList(targetNumber).findLoc)
+      if(targetList[targetNumber].findLoc)
       {
-      　//飞到对应位置
+       //飞到对应位置
        //如果在位置范围内执行相应策略
+       //++targetNumber;
       }else{
-        int ground_vertical = targetList(targetNumber).ground_vertical;
+        int ground_vertical = targetList[targetNumber].ground_vertical;
         if(ground_vertical==0)
         {
           //飞高
@@ -318,13 +265,15 @@ private:
       cout<<"realHeight"<<realHeight<<"  "<<"throttle:"<<throttle<<endl;
   }
   
-  
-   //前视和下视彩色图
-  void observeEnvironment(const cv::Mat& frontScene,
-                          const cv::Mat& groundScene,
-                          const vector<float>& depthData)
+    //观察环境（图像以及自身位置）更新目标位置
+  void observeEnvironment(cv::Mat& cvMat_frontScene,
+                          cv::Mat& cvMat_groundScene,
+                          const std::vector<float>& depthData,
+                          const geometry_msgs::Pose& frontCameraPose,
+                          const geometry_msgs::Pose& groundCameraPose)
   {
-      for (int i = 0; i < image_S.rows; i++)
+  //cv::Mat cvMat_frontDepthReal.create(rows,colums , CV_32FC1);//获取深度信息
+      /*for (int i = 0; i < image_S.rows; i++)
       {
           uchar* data = image_S.ptr<uchar>(i);
           for (int j = 0; j < image_S.cols; j++)
@@ -335,10 +284,26 @@ private:
                   data[j] = 255;
           }
       }
+       float* pData = (float*)cvMat_frontDepthReal.data;  
+      for(size_t i=0;i < .size(); ++i)
+      {
+           //cout<<*pData<<endl;
+           if(response_frontDepthReal.image_data_float[i]>100)
+               *pData++ = 100;
+           else
+               *pData++ = response_frontDepthReal.image_data_float[i];
+      } */
+        //保存图片
+      if(SAVE_PICTURE)
+      {
+        savePicture(cvMat_frontScene,"frontScene");
+      }
+        
+          
         //矩形识别
       cv::Mat resultImage1;
       
-      bool = rectRecog.findSquares(cvMat_groundScene, resultImage1);
+      bool ifFindSquares = rectRecog.findSquares(cvMat_groundScene, resultImage1);
       if(ifFindSquares)
       {
         int number = numRecong.getNumber(resultImage1);
@@ -346,13 +311,12 @@ private:
      }
   }
   
+
   
   //获取相机内参
   void setCameraParams()
   {
       msgCameraInfo.header.frame_id = "camera";
-      msgCameraInfo.height = rows;
-      msgCameraInfo.width = colums;
       //The distortion parameters, size depending on the distortion model.
       //For "plumb_bob", the 5 parameters are: (k1, k2, t1, t2, k3).
       msgCameraInfo.distortion_model = "plumb_bob";//畸变
@@ -387,24 +351,26 @@ private:
       sensor_msgs::Image msgDepth;
       cv_bridge::CvImage(header, "32FC1", cvMat_frontDepth).toImageMsg(msgDepth);  
       msgCameraInfo.header.stamp = timestamp;
+      msgCameraInfo.height = response_frontDepth.height;
+      msgCameraInfo.width = response_frontDepth.width;
       pub_cameraInfo.publish(msgDepth,msgCameraInfo);
   }
   //获得相机位姿
-  geometry_msgs::Pose getCameraPose(const ImageResponse& response_frontDepth)
+  geometry_msgs::Pose getCameraPose(const ImageResponse& response)
   {
       geometry_msgs::Pose pose;
-      pose.position.x = response_frontDepth.camera_position.x();
-      pose.position.y = response_frontDepth.camera_position.y();
-      pose.position.z = response_frontDepth.camera_position.z();
+      pose.position.x = response.camera_position.x();
+      pose.position.y = response.camera_position.y();
+      pose.position.z = -response.camera_position.z();//z轴朝下加负号
       //ROS_INFO("x:%lf,y:%lf,z:%lf",pose.position.x,pose.position.y,pose.position.z);
 
 
       //AirSimz轴朝下,所以需要转换一下 rpy:roll pitch yaw
       geometry_msgs::Quaternion rect_orientation;
-      rect_orientation.x = response_frontDepth.camera_orientation.x();
-      rect_orientation.y = response_frontDepth.camera_orientation.y();
-      rect_orientation.z = response_frontDepth.camera_orientation.z();
-      rect_orientation.w = response_frontDepth.camera_orientation.w();
+      rect_orientation.x = response.camera_orientation.x();
+      rect_orientation.y = response.camera_orientation.y();
+      rect_orientation.z = response.camera_orientation.z();
+      rect_orientation.w = response.camera_orientation.w();
 
       geometry_msgs::Vector3 rpy =  quat2rpy(rect_orientation);
       rpy.y = -rpy.y;
@@ -427,7 +393,7 @@ private:
     //the point of camera origin in world coordinate 
     transformCamera.setOrigin(tf::Vector3(CamPose.position.y,
                                           CamPose.position.x,
-                                         -CamPose.position.z));
+                                          CamPose.position.z));
     transformCamera.setRotation(tf::Quaternion(CamPose.orientation.x, 
                                                CamPose.orientation.y, 
                                                CamPose.orientation.z,
@@ -436,32 +402,20 @@ private:
   } 
   
   
-  //储存数据
-  void savePicture(const cv::Mat& frontScene,const cv::Mat& groundScene,const cv::Mat& depth,int framenum)
+  //储存
+  void savePicture(const cv::Mat& picture,const char* directory)
   {
       std::vector<int> compression_params;
       compression_params.push_back(CV_IMWRITE_PNG_COMPRESSION); //PNG格式图片的压缩级别    
       compression_params.push_back(0); 
     
-      char prefix1[]="/home/exbot/Pictures/frontScene/";
-      char prefix2[]="/home/exbot/Pictures/groundScene/";
-      char prefix3[]="/home/exbot/Pictures/depth/";
+      char prefix[]="/home/exbot/Pictures/";
       char postfix[]=".png";  
       
-      char path0[255]={0};
-      memset(path0,'\0',sizeof(char)*255);
-      sprintf(path0,"%sframe_%04d%s",prefix1,framenum,postfix);
-      imwrite(path0,frontScene);
-      
-      char path1[255]={0};
-      memset(path1,'\0',sizeof(char)*255);
-      sprintf(path1,"%sframe_%04d%s",prefix2,framenum,postfix);
-      imwrite(path1,groundScene);
-      
-      char path2[255]={0};
-      memset(path2,'\0',sizeof(char)*255);
-      sprintf(path2,"%sframe_%04d%s",prefix3,framenum,postfix);
-      imwrite(path2,depth);
+      char path[255]={0};
+      memset(path,'\0',sizeof(char)*255);
+      sprintf(path,"%s%sframe_%04d%s",prefix,directory,frameNum,postfix);
+      imwrite(path,picture);
   }
   
   /*void callback(const std_msgs::Float64::ConstPtr& input)  {  
@@ -506,13 +460,13 @@ private:
    int targetNumber = 2;//目标数字
    
    
-   typedef struct Target
+   struct Target
    {
       int ground_vertical = -1;//未知(-1)数字地面(0)还是垂直(1)
-      bool findLoc = bool;//是否发现目标位置
+      bool findLoc = false;//是否发现目标位置
       geometry_msgs::Vector3 location;//目标大概位置
-   }Target;
-   std::vector<Target> targetList(11);//0-10 方便写代码
+   };
+   std::vector<Target> targetList;//0-10 方便写代码
    
    //新建线程进行阻塞操作
    ecl::Thread connect_publish_thread;
@@ -543,4 +497,38 @@ bool pixels_as_float = false;
 bool compress = true;
 int width = 0, height = 0;
 ImageType image_type;
-*/
+
+
+//手动控制模式并保存图像
+if(ManualMODE)
+{
+  if(read(kfd, &c, 1) < 0)
+  {
+    perror("read():");
+    exit(-1);
+  }
+
+  switch(c)
+  {
+    case KEYCODE_L:
+      client->moveByAngleThrottle(0, -roll, throttle, 0, duration);
+      break;
+    case KEYCODE_R:
+      client->moveByAngleThrottle(0, roll, throttle, 0, duration);
+      break;
+    case KEYCODE_U:
+      client->moveByAngleThrottle(-pitch, 0, throttle, 0, duration);
+      break;
+    case KEYCODE_D:
+      client->moveByAngleThrottle(pitch, 0, throttle, 0, duration);
+      break;
+    case KEYCODE_W:
+      client->moveByAngleThrottle(0.0001, 0, 0.65, 0, duration);
+      break;
+    case KEYCODE_S:
+      client->moveByAngleThrottle(0.0001, 0, 0.55, 0, duration);
+      break;
+    //default:
+      //cout<<"hello"<<endl;//printf("value: %c = 0x%02X = %d\n", c, c, c);
+  }
+}*/
